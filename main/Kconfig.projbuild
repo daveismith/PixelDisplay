@@ -1,0 +1,128 @@
+menu "Pixel Display Configuration"
+
+choice
+   prompt "Display Scan Mode"
+   default DISPLAY_SCAN_8
+
+   config DISPLAY_SCAN_4
+      bool "4"
+
+   config DISPLAY_SCAN_8
+      bool "8"
+
+   config DISPLAY_SCAN_16
+      bool "16"
+
+   config DISPLAY_SCAN_32
+      bool "32"
+
+endchoice
+
+config DISPLAY_SCAN
+    int
+    default 8
+    default 4 if DISPLAY_SCAN_4
+    default 8 if DISPLAY_SCAN_8
+    default 16 if DISPLAY_SCAN_16
+    default 32 if DISPLAY_SCAN_32
+
+config DISPLAY_GPIO_STB_LAT
+   int "Display STB/LAT GPIO"
+   range 0 34
+   default 22
+   help 
+      GPIO number (IOxx) connected to the STB or LAT pin of the PX display.
+
+      Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
+
+      GPIOs 35-39 are input-only so cannot be used as outputs
+
+config DISPLAY_GPIO_A
+   int "Display A GPIO"
+   range 0 34
+   default 19
+   help 
+      GPIO number (IOxx) connected to the A pin of the PX display.
+
+      Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
+
+      GPIOs 35-39 are input-only so cannot be used as outputs
+
+config DISPLAY_GPIO_B
+   int "Display B GPIO"
+   range 0 34
+   default 23
+   help 
+      GPIO number (IOxx) connected to the B pin of the PX display.
+
+      Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
+
+      GPIOs 35-39 are input-only so cannot be used as outputs
+
+config DISPLAY_GPIO_C
+   int "Display C GPIO" if DISPLAY_SCAN_8 || DISPLAY_SCAN_16 || DISPLAY_SCAN_32
+   range 0 34
+   default 18
+   help 
+      GPIO number (IOxx) connected to the C pin of the PX display. This is only used if the display scan layout is set to 8, 16, or 32.
+
+      Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
+
+      GPIOs 35-39 are input-only so cannot be used as outputs
+
+config DISPLAY_GPIO_D
+   int "Display D GPIO" if DISPLAY_SCAN_16 || DISPLAY_SCAN_32
+   range 0 34
+   default 5
+   help 
+      GPIO number (IOxx) connected to the D pin of the PX display. This is only used if the display scan layout is set to 16 or 32.
+
+      Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
+
+      GPIOs 35-39 are input-only so cannot be used as outputs
+
+config DISPLAY_GPIO_E
+   int "Display E GPIO" if DISPLAY_SCAN_32
+   range 0 34
+   default 15
+   help 
+      GPIO number (IOxx) connected to the E pin of the PX display. This is only used if the display scan layout is set to 32.
+
+      Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
+
+      GPIOs 35-39 are input-only so cannot be used as outputs
+
+config DISPLAY_GPIO_P_OE
+   int "Display P_OE GPIO"
+   range 0 34
+   default 2
+   help 
+      GPIO number (IOxx) connected to the OE pin of the PX display.
+
+      Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
+
+      GPIOs 35-39 are input-only so cannot be used as outputs
+
+config DISPLAY_GPIO_CLK
+   int "Display CLK GPIO"
+   range 0 34
+   default 14
+   help 
+      GPIO number (IOxx) connected to the CLK pin of the PX display.
+
+      Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
+
+      GPIOs 35-39 are input-only so cannot be used as outputs
+
+config DISPLAY_GPIO_R0
+   int "Display R0/RD1 GPIO"
+   range 0 34
+   default 22
+   help 
+      GPIO number (IOxx) connected to the R0 or RD1 pin of the PX display.
+
+      Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
+
+      GPIOs 35-39 are input-only so cannot be used as outputs
+   
+endmenu
