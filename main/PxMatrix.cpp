@@ -12,14 +12,28 @@
 #include "driver/gpio.h"
 #include "PxMatrix.h"
 
-#define SPI_BUS_CLK 14
-#define SPI_BUS_MOSI 13
-#define SPI_BUS_MISO 12
-#define SPI_BUS_SS 4
+//#define USE_HSPI
+
+#ifdef USE_HSPI
+  #define SPI_HOST_TYPE HSPI_HOST
+  #define SPI_BUS_CLK 14
+  #define SPI_BUS_MOSI 13
+  #define SPI_BUS_MISO 12
+  #define SPI_BUS_SS 4
+#else
+  #define SPI_HOST_TYPE VSPI_HOST
+  #define SPI_BUS_CLK 18
+  #define SPI_BUS_MOSI 23
+  #define SPI_BUS_MISO 19
+  #define SPI_BUS_SS 21
+#endif //
+
 
 #ifndef _BV
 #define _BV(x) (1 << (x))
 #endif
+
+#define BIT_BUFFER_SWAP_OK   ( 1 << 0 )
 
 #define color_depth 8
 #define color_step 256 / color_depth
@@ -150,6 +164,12 @@ void PxMatrix::selectBuffer(bool selected_buffer)
    _selected_buffer = selected_buffer;
 }
 
+void PxMatrix::swapBuffer()
+{
+   xEventGroupWaitBits(xDisplayEventGroup, BIT_BUFFER_SWAP_OK, pdFALSE, pdTRUE, 1000 / portTICK_PERIOD_MS);
+   _selected_buffer = !_selected_buffer;
+}
+
 void PxMatrix::setColorOffset(uint8_t r, uint8_t g, uint8_t b)
 {
 }
@@ -167,6 +187,7 @@ void PxMatrix::fillMatrixBuffer(int16_t x, int16_t y, uint8_t r, uint8_t g, uint
 
    x = _width - 1 - x;
 
+   uint8_t buffer_idx = selected_buffer ? 1 : 0;
    uint32_t base_offset;
    uint32_t total_offset_r = 0;
    uint32_t total_offset_g = 0;
@@ -199,22 +220,22 @@ void PxMatrix::fillMatrixBuffer(int16_t x, int16_t y, uint8_t r, uint8_t g, uint
 
       uint32_t off_r = (this_color * _buffer_size) + total_offset_r;
       if (r > color_thresh + _color_R_offset)
-         buffer[0][off_r] |= _BV(bit_select);
+         buffer[buffer_idx][off_r] |= _BV(bit_select);
       else
-         buffer[0][off_r] &= ~_BV(bit_select);
+         buffer[buffer_idx][off_r] &= ~_BV(bit_select);
 
       uint32_t off_g = (((this_color + color_third_step) % color_depth) * _buffer_size ) + total_offset_g;
 
       if (g > color_thresh + _color_G_offset)
-         buffer[0][off_g] |= _BV(bit_select);
+         buffer[buffer_idx][off_g] |= _BV(bit_select);
       else
-         buffer[0][off_g] &= ~_BV(bit_select);
+         buffer[buffer_idx][off_g] &= ~_BV(bit_select);
 
       uint32_t off_b = (((this_color + color_two_third_step) % color_depth) * _buffer_size) + total_offset_b;
       if (b > color_thresh + _color_B_offset)
-         buffer[0][off_b] |= _BV(bit_select);
+         buffer[buffer_idx][off_b] |= _BV(bit_select);
       else
-         buffer[0][off_b] &= ~_BV(bit_select);
+         buffer[buffer_idx][off_b] &= ~_BV(bit_select);
    }
 }
 
@@ -229,7 +250,7 @@ void PxMatrix::drawPixelRGB565(int16_t x, int16_t y, uint16_t color) {
   uint8_t r = ((((color >> 11) & 0x1F) * 527) + 23) >> 6;
   uint8_t g = ((((color >> 5) & 0x3F) * 259) + 33) >> 6;
   uint8_t b = (((color & 0x1F) * 527) + 23) >> 6;
-  fillMatrixBuffer( x,  y, r, g, b, 0);
+  fillMatrixBuffer( x,  y, r, g, b, _selected_buffer);
 }
 
 void PxMatrix::drawPixelRGB888(int16_t x, int16_t y, uint8_t r, uint8_t g, uint8_t b, bool selected_buffer) {
@@ -237,7 +258,7 @@ void PxMatrix::drawPixelRGB888(int16_t x, int16_t y, uint8_t r, uint8_t g, uint8
 }
 
 void PxMatrix::drawPixelRGB888(int16_t x, int16_t y, uint8_t r, uint8_t g, uint8_t b) {
-  fillMatrixBuffer(x, y, r, g, b, 0);
+  fillMatrixBuffer(x, y, r, g, b, _selected_buffer);
 }
 
 void PxMatrix::begin()
@@ -277,9 +298,9 @@ void PxMatrix::begin(uint8_t row_pattern)
    dev.queue_size=2;
    
    // Set Up The SPI on ESP32
-   ret = spi_bus_initialize(HSPI_HOST, &cfg, 2);
+   ret = spi_bus_initialize(SPI_HOST_TYPE, &cfg, 2);
    ESP_ERROR_CHECK(ret);
-   ret = spi_bus_add_device(HSPI_HOST, &dev, &spi);
+   ret = spi_bus_add_device(SPI_HOST_TYPE, &dev, &spi);
    ESP_ERROR_CHECK(ret);
    
    // set_data_mode = SPI_MODE0
@@ -327,9 +348,12 @@ void PxMatrix::begin(uint8_t row_pattern)
    }
 
    // Allocate The Stuff
-   buffer[0] = (uint8_t *)calloc(_buffer_size, color_depth);
-   buffer[1] = (uint8_t *)calloc(_buffer_size, color_depth);
-   flushBuffer = (uint8_t *)calloc(_send_buffer_size, 1);
+   buffer[0] = (uint8_t *)heap_caps_calloc(_buffer_size, color_depth, MALLOC_CAP_DMA);
+   buffer[1] = (uint8_t *)heap_caps_calloc(_buffer_size, color_depth, MALLOC_CAP_DMA);
+   flushBuffer = (uint8_t *)heap_caps_calloc(_send_buffer_size, 1, MALLOC_CAP_DMA);
+
+   // Create The Event Group
+   xDisplayEventGroup = xEventGroupCreate();
 }
 
 void PxMatrix::set_mux(uint8_t value)
@@ -410,21 +434,27 @@ void PxMatrix::display(uint16_t show_time)
    spi_transaction_t *rtrans;
    esp_err_t ret;
    unsigned long start_time = 0;
+   xEventGroupClearBits(xDisplayEventGroup, BIT_BUFFER_SWAP_OK);
    for (uint8_t i = 0; i < _row_pattern; i++)
    {
+      //if (2 < i)
+      //  continue;
+
       if (_fast_update) {
          printf("fast update\n");
          fflush(stdout);
       } 
       else 
       {
+	 uint8_t buffer_idx = _active_buffer ? 1 : 0;
          uint32_t offset = (_display_color * _buffer_size) + (i * _send_buffer_size);
          set_mux(i);
          _transactions[0].length = _send_buffer_size << 3;
          _transactions[0].rxlength = 0;
          _transactions[0].flags = SPI_TRANS_USE_RXDATA;
-         _transactions[0].tx_buffer = &(buffer[0][offset]);
+         _transactions[0].tx_buffer = &(buffer[buffer_idx][offset]);
 
+	 ets_delay_us(100);
          ret = spi_device_queue_trans(spi, &_transactions[0], portMAX_DELAY);
          ESP_ERROR_CHECK(ret);
          ret = spi_device_get_trans_result(spi, &rtrans, portMAX_DELAY);
@@ -437,6 +467,8 @@ void PxMatrix::display(uint16_t show_time)
    {
       _display_color = 0;
 // Flip the Buffer?
+      _active_buffer = _selected_buffer;
+      xEventGroupSetBits(xDisplayEventGroup, BIT_BUFFER_SWAP_OK);
    }
 
 }
@@ -619,4 +651,14 @@ extern void pxmatrix_displayTestPixel(pxmatrix *matrix, uint16_t show_time)
 extern void pxmatrix_setFastUpdate(pxmatrix *matrix, bool fast_update)
 {
    real(matrix)->setFastUpdate(fast_update);
+}
+
+extern void pxmatrix_selectBuffer(pxmatrix *matrix, bool selected_buffer)
+{
+   real(matrix)->selectBuffer(selected_buffer);
+}
+
+extern void pxmatrix_swapBuffer(pxmatrix *matrix)
+{
+   real(matrix)->swapBuffer();
 }

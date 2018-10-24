@@ -9,6 +9,7 @@
 #define PXMATRIX_H__
 #include <inttypes.h>
 #include "driver/spi_master.h"
+#include "freertos/event_groups.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -76,6 +77,8 @@ public:
 
    // Select active buffer to update display from
    void selectBuffer(bool selected_buffer);
+
+   void swapBuffer();
    
    // Control the minimum colour values that result in an active pixel
    void setColorOffset(uint8_t r, uint8_t g, uint8_t b);
@@ -90,6 +93,7 @@ private:
    // SPI Device
    spi_device_handle_t spi;
    spi_transaction_t _transactions[2];
+   EventGroupHandle_t xDisplayEventGroup;
 
    uint8_t *buffer[2];
    uint8_t *flushBuffer;
@@ -189,6 +193,10 @@ extern void pxmatrix_displayTestPattern(pxmatrix *matrix, uint16_t show_time);
 extern void pxmatrix_displayTestPixel(pxmatrix *matrix, uint16_t show_time);
 
 extern void pxmatrix_setFastUpdate(pxmatrix *matrix, bool fast_update);
+
+extern void pxmatrix_selectBuffer(pxmatrix *matrix, bool selected_buffer);
+
+extern void pxmatrix_swapBuffer(pxmatrix *matrix);
 
 #ifdef __cplusplus
 }

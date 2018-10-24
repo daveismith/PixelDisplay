@@ -30,22 +30,43 @@
 #include "esp_bt_device.h"
 #include "blufi_example.h"
 
+#include <sys/unistd.h>
+#include <sys/stat.h>
+#include "esp_err.h"
+#include "esp_vfs_fat.h"
+#include "driver/sdmmc_host.h"
+#include "driver/sdspi_host.h"
+#include "sdmmc_cmd.h"
+
+#include <driver/adc.h>
+
 static EventGroupHandle_t ble_event_group;
 static EventGroupHandle_t wifi_event_group;
+
+static xQueueHandle sd_gpio_evt_queue = NULL;
 
 const static int CONNECTED_BIT = BIT0; // Both BLE and WiFi
 const static int STARTED_BIT = BIT1;
 const static int BLE_ADV_BIT = BIT2;
 
-#define P_LAT 22
-#define P_A 19
-#define P_B 23
-#define P_C 18
+//#define P_LAT 22 // Old
+#define P_LAT 26
+//#define P_A 19 // Old
+#define P_A 27
+//#define P_B 23 // Old
+#define P_B 17
+//#define P_C 18 // Old
+#define P_C 25
 #define P_D 5
 #define P_E 15
-#define P_OE 2
+//#define P_OE 2	// Old
+#define P_OE 21
+
+#define ESP_INTR_FLAG_DEFAULT 0
 
 const static char *TAG = "PixelDisplay";
+static const char *SD_TAG = "SD";
+
 
 /* store the station info for send back to phone */
 static bool gl_sta_connected = false;
@@ -55,13 +76,13 @@ static int gl_sta_ssid_len;
 
 static int taskCore = 0;
 TaskHandle_t xTask1;
+TaskHandle_t xTask2;
 
 pxmatrix* display = NULL;
 
 #define ANIM0
-//#define ANIM1
-//#define ANIM2
-//#define ANIM3
+#define ANIM1
+#define ANIM2
 
 const uint8_t animation_lengths[]={
 #ifdef ANIM0
@@ -73,9 +94,6 @@ const uint8_t animation_lengths[]={
 #ifdef ANIM2
 49,
 #endif //ANIM2
-#ifdef ANIM3
-10,
-#endif //ANIM3
 };
 
 const size_t animation_count = sizeof(animation_lengths) / sizeof(uint8_t);
@@ -90,20 +108,20 @@ const uint8_t animations[] = {
 #ifdef ANIM2
    #include "anim2.h"
 #endif //ANIM2
-#ifdef ANIM3
-   #include "anim3.h"
-#endif //ANIM3
 };
 
 size_t currentAnimation = 0;
 size_t currentFrame = 0;
 size_t frameSize = 1024;
 
+
 static void _display_timer_cb(void *arg)
 {
+   static uint8_t cnt = 0;
    pxmatrix *display = (pxmatrix *)arg;
-   pxmatrix_display(display, 35);
-   //pxmatrix_display(display, 70);
+   //pxmatrix_display(display, 15);
+   //pxmatrix_display(display, 35);
+   pxmatrix_display(display, 70);
 }
 
 void draw_anim(pxmatrix *display, size_t animation)
@@ -123,6 +141,9 @@ void draw_anim(pxmatrix *display, size_t animation)
       for (size_t xx = 0; xx < 32; xx++)
       {
          val = ptr[0] | (ptr[1] << 8);
+	 //val &= 0x001f;
+	 //val &= 0x07e0;
+	 //val &= 
          pxmatrix_drawPixelRGB565(display, xx, yy, val);
          ptr += 2;
       }
@@ -132,6 +153,7 @@ void draw_anim(pxmatrix *display, size_t animation)
       currentFrame = 0;
 }
 
+//#define DISPLAY_TIMER_PERIOD_US        500
 #define DISPLAY_TIMER_PERIOD_US        1000
 //#define DISPLAY_TIMER_PERIOD_US        2000
 
@@ -142,6 +164,11 @@ void display_task(void *pvParameter)
    pxmatrix_begin(display, 8);
    pxmatrix_clearDisplay(display);
    pxmatrix_setFastUpdate(display, false);
+
+   // GPIO22
+   gpio_pad_select_gpio(GPIO_NUM_22);
+   gpio_set_direction(GPIO_NUM_22, GPIO_MODE_OUTPUT);
+   gpio_set_level(GPIO_NUM_22, 1);
 
    //xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT, false, true, portMAX_DELAY);
 
@@ -161,15 +188,191 @@ void display_task(void *pvParameter)
 
    int taskCore = xPortGetCoreID();
    printf("display task running on %d\n", taskCore);
-   //draw_anim(display, 2);
-
+   //pxmatrix_selectBuffer(display, false);
+   draw_anim(display, currentAnimation);
+   //pxmatrix_selectBuffer(display, true);
+   //draw_anim(display, 0);
+  
+   size_t cnt = 0; 
    while (true) {
-      vTaskDelay(100 / portTICK_PERIOD_MS);
-
+      //vTaskDelay(1000 / portTICK_PERIOD_MS);
+      //vTaskDelay(200 / portTICK_PERIOD_MS);
+      //vTaskDelay(100 / portTICK_PERIOD_MS);
       //vTaskDelay(66 / portTICK_PERIOD_MS);
-      //vTaskDelay(33 / portTICK_PERIOD_MS);
-      draw_anim(display, 2);
+      vTaskDelay(33 / portTICK_PERIOD_MS);
+      
+      pxmatrix_swapBuffer(display);
+      draw_anim(display, currentAnimation);
+
+      if (currentFrame == 0) {
+         currentAnimation++;
+
+         if (currentAnimation > animation_count) {
+            currentAnimation = 0;
+	 }
+      }
+      
    }
+}
+
+static void IRAM_ATTR sd_gpio_isr_handler(void* arg)
+{
+    uint32_t gpio_num = (uint32_t) arg;
+    xQueueSendFromISR(sd_gpio_evt_queue, &gpio_num, NULL);
+}
+
+void test_sd()
+{
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    ESP_LOGI(SD_TAG, "Initializing SD card");
+
+    ESP_LOGI(SD_TAG, "Using SDMMC peripheral");
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.slot = SDMMC_HOST_SLOT_1;
+
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+    //TODO: Need External Pullups?
+    gpio_set_pull_mode(15, GPIO_PULLUP_ONLY);   // CMD, needed in 4- and 1- line modes
+    gpio_set_pull_mode(2, GPIO_PULLUP_ONLY);    // D0, needed in 4- and 1-line modes
+    gpio_set_pull_mode(4, GPIO_PULLUP_ONLY);    // D1, needed in 4-line mode only
+    gpio_set_pull_mode(12, GPIO_PULLUP_ONLY);   // D2, needed in 4-line mode only
+    gpio_set_pull_mode(13, GPIO_PULLUP_ONLY);   // D3, needed in 4- and 1-line modes
+
+    // Options for mounting the filesystem.
+    // If format_if_mount_failed is set to true, SD card will be partitioned and
+    // formatted in case when mounting fails.
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 5,
+        .allocation_unit_size = 16 * 1024
+    };
+
+    // Use settings defined above to initialize SD card and mount FAT filesystem.
+    // Note: esp_vfs_fat_sdmmc_mount is an all-in-one convenience function.
+    // Please check its source code and implement error recovery when developing
+    // production applications.
+    sdmmc_card_t* card;
+    esp_err_t ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
+
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(SD_TAG, "Failed to mount filesystem. "
+                "If you want the card to be formatted, set format_if_mount_failed = true.");
+        } else {
+            ESP_LOGE(SD_TAG, "Failed to initialize the card (%s). "
+                "Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
+        }
+        return;
+    }
+
+    // Card has been initialized, print its properties
+    sdmmc_card_print_info(stdout, card);
+
+    // Use POSIX and C standard library functions to work with files.
+    // First create a file.
+    ESP_LOGI(SD_TAG, "Opening file");
+    FILE* f = fopen("/sdcard/hello.txt", "w");
+    if (f == NULL) {
+        ESP_LOGE(SD_TAG, "Failed to open file for writing");
+        return;
+    }
+    fprintf(f, "Hello %s!\n", card->cid.name);
+    fclose(f);
+    ESP_LOGI(TAG, "File written");
+
+    // Check if destination file exists before renaming
+    struct stat st;
+    if (stat("/sdcard/foo.txt", &st) == 0) {
+        // Delete it if it exists
+        unlink("/sdcard/foo.txt");
+    }
+
+    // Rename original file
+    ESP_LOGI(SD_TAG, "Renaming file");
+    if (rename("/sdcard/hello.txt", "/sdcard/foo.txt") != 0) {
+        ESP_LOGE(SD_TAG, "Rename failed");
+        return;
+    }
+
+    // Open renamed file for reading
+    ESP_LOGI(SD_TAG, "Reading file");
+    f = fopen("/sdcard/foo.txt", "r");
+    if (f == NULL) {
+        ESP_LOGE(SD_TAG, "Failed to open file for reading");
+        return;
+    }
+    char line[64];
+    fgets(line, sizeof(line), f);
+    fclose(f);
+    // strip newline
+    char* pos = strchr(line, '\n');
+    if (pos) {
+        *pos = '\0';
+    }
+    ESP_LOGI(SD_TAG, "Read from file: '%s'", line);
+
+    // All done, unmount partition and disable SDMMC or SPI peripheral
+    esp_vfs_fat_sdmmc_unmount();
+    ESP_LOGI(SD_TAG, "Card unmounted");
+}
+
+void sd_task(void *pvParameter)
+{
+    uint32_t io_num;
+    int last_level = 0xff;
+    // Create The Event Queue For SD Events
+    sd_gpio_evt_queue = xQueueCreate(4, sizeof(uint32_t));
+
+    gpio_set_direction(GPIO_NUM_16, GPIO_MODE_INPUT);
+    gpio_set_intr_type(GPIO_NUM_16, GPIO_INTR_ANYEDGE);
+    gpio_isr_handler_add(GPIO_NUM_16, sd_gpio_isr_handler, (void*) GPIO_NUM_16);
+
+    io_num = GPIO_NUM_16;
+    xQueueSend(sd_gpio_evt_queue, &io_num, 500 / portTICK_PERIOD_MS);
+
+    for(;;) {
+        if(xQueueReceive(sd_gpio_evt_queue, &io_num, portMAX_DELAY) && last_level != gpio_get_level(io_num)) {
+	    last_level = gpio_get_level(io_num);
+            printf("GPIO[%d] intr, val: %d\n", io_num, last_level);
+	    if (GPIO_NUM_16 == io_num && last_level) {
+	        test_sd();
+	    }
+        }
+    }
+
+    vTaskDelete(NULL);
+}
+
+void adc_task(void *pvParameter)
+{
+    // GPIO 34 = ADC1_CHANNEL_6
+    // GPIO 35 = ADC1_CHANNEL_7
+
+    gpio_set_direction(GPIO_NUM_34, GPIO_MODE_INPUT);
+    gpio_set_direction(GPIO_NUM_35, GPIO_MODE_INPUT);
+
+    adc1_config_width(ADC_WIDTH_BIT_12);
+    adc1_config_channel_atten(ADC1_CHANNEL_6,ADC_ATTEN_DB_11);
+    adc1_config_channel_atten(ADC1_CHANNEL_7,ADC_ATTEN_DB_11);
+    
+
+    //int status = 0;
+    for(;;) {
+	vTaskDelay(1000/portTICK_PERIOD_MS);
+    	int val1 = adc1_get_raw(ADC1_CHANNEL_6);
+	int val2 = adc1_get_raw(ADC1_CHANNEL_7);
+
+	int gpio1 = gpio_get_level(GPIO_NUM_34);
+	int gpio2 = gpio_get_level(GPIO_NUM_35);
+
+	printf("adc1: %u, gpio1: %u, adc2: %u, gpio2: %u\n", val1, gpio1, val2, gpio2);
+	//gpio_set_level(GPIO_NUM_22, status);
+	//status = (status != 0) ? 0 : 1;
+    }
+
+    vTaskDelete(NULL);
 }
 
 /********************************************************************************
@@ -604,6 +807,8 @@ void app_main()
    }
    ESP_ERROR_CHECK( ret );
 
+   // Configure The GPIO Stuff
+   gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
 
     // Print chip information
     esp_chip_info_t chip_info;
@@ -638,6 +843,24 @@ void app_main()
       NULL, 
       configMAX_PRIORITIES, 
       &xTask1);
+
+   xTaskCreate(
+      &sd_task,
+      "sd_task",
+      4096,
+      NULL,
+      configMAX_PRIORITIES - 1,
+      &xTask2);
+
+/*   xTaskCreate(
+      &adc_task,
+      "adc_task",
+      2048,
+      NULL,
+      configMAX_PRIORITIES - 2,
+      &xTask2);
+*/
+   
 
    wifi_conn_init();
    ble_init();
