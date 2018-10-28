@@ -11,8 +11,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "driver/uart.h"
+#include "linenoise/linenoise.h"
+#include "argtable3/argtable3.h"
+#include "cmd_decl.h"
 
 #include "esp_log.h"
+#include "esp_console.h"
+#include "esp_vfs_dev.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "esp_event.h"
@@ -20,8 +26,9 @@
 #include "nvs_flash.h"
 #include "esp_bt.h"
 #include "sdkconfig.h"
-#include "PxMatrix.h"
 #include "esp_spi_flash.h"
+
+#include "display.h"
 
 #include "esp_blufi_api.h"
 #include "esp_bt_defs.h"
@@ -40,31 +47,45 @@
 
 #include <driver/adc.h>
 
+#include <esp_http_server.h>
+
+#include "libesphttpd/httpd.h"
+#include "libesphttpd/httpdespfs.h"
+#include "libesphttpd/cgiwifi.h"
+#include "libesphttpd/cgiflash.h"
+#include "libesphttpd/auth.h"
+#include "libesphttpd/espfs.h"
+#include "libesphttpd/captdns.h"
+#include "libesphttpd/webpages-espfs.h"
+#include "libesphttpd/cgiwebsocket.h"
+#include "libesphttpd/httpd-freertos.h"
+#include "libesphttpd/route.h"
+
+#include <cJSON.h>
+
+typedef struct {
+   httpd_handle_t httpd;
+} app_context_t;
+
 static EventGroupHandle_t ble_event_group;
-static EventGroupHandle_t wifi_event_group;
+EventGroupHandle_t wifi_event_group;
 
 static xQueueHandle sd_gpio_evt_queue = NULL;
 
-const static int CONNECTED_BIT = BIT0; // Both BLE and WiFi
-const static int STARTED_BIT = BIT1;
-const static int BLE_ADV_BIT = BIT2;
+#define LISTEN_PORT     80u
+#define MAX_CONNECTIONS 4u
 
-//#define P_LAT 22 // Old
-#define P_LAT 26
-//#define P_A 19 // Old
-#define P_A 27
-//#define P_B 23 // Old
-#define P_B 17
-//#define P_C 18 // Old
-#define P_C 25
-#define P_D 5
-#define P_E 15
-//#define P_OE 2	// Old
-#define P_OE 21
+static char connectionMemory[sizeof(RtosConnType) * MAX_CONNECTIONS];
+static HttpdFreertosInstance httpdInstance;
+
+const int CONNECTED_BIT = BIT0; // Both BLE and WiFi
+const int STARTED_BIT = BIT1;
+const int BLE_ADV_BIT = BIT2;
 
 #define ESP_INTR_FLAG_DEFAULT 0
 
-const static char *TAG = "PixelDisplay";
+static const char *HTTP_TAG = "HTTP";
+static const char *WIFI_TAG = "WiFi";
 static const char *SD_TAG = "SD";
 
 
@@ -74,151 +95,25 @@ static uint8_t gl_sta_bssid[6];
 static uint8_t gl_sta_ssid[32];
 static int gl_sta_ssid_len;
 
-static int taskCore = 0;
 TaskHandle_t xTask1;
 TaskHandle_t xTask2;
-
-pxmatrix* display = NULL;
-
-#define ANIM0
-#define ANIM1
-#define ANIM2
-
-const uint8_t animation_lengths[]={
-#ifdef ANIM0
-14,
-#endif //ANIM0
-#ifdef ANIM1
-17,
-#endif //ANIM1
-#ifdef ANIM2
-49,
-#endif //ANIM2
-};
-
-const size_t animation_count = sizeof(animation_lengths) / sizeof(uint8_t);
-
-const uint8_t animations[] = {
-#ifdef ANIM0
-   #include "anim0.h"
-#endif //ANIM0
-#ifdef ANIM1
-   #include "anim1.h"
-#endif //ANIM1
-#ifdef ANIM2
-   #include "anim2.h"
-#endif //ANIM2
-};
-
-size_t currentAnimation = 0;
-size_t currentFrame = 0;
-size_t frameSize = 1024;
-
-
-static void _display_timer_cb(void *arg)
-{
-   static uint8_t cnt = 0;
-   pxmatrix *display = (pxmatrix *)arg;
-   //pxmatrix_display(display, 15);
-   //pxmatrix_display(display, 35);
-   pxmatrix_display(display, 70);
-}
-
-void draw_anim(pxmatrix *display, size_t animation)
-{
-   if (animation >= animation_count) {
-      animation = animation % animation_count;
-   }
-   int frames = animation_lengths[animation];
-   int frame_offset = 0;
-   for (int idx = 0; idx < animation; idx++)
-      frame_offset += animation_lengths[idx];
-
-   const uint8_t *ptr = animations + (frame_offset + currentFrame) * frameSize;
-   uint16_t val;
-   for (size_t yy = 0; yy < 16; yy++)
-   {
-      for (size_t xx = 0; xx < 32; xx++)
-      {
-         val = ptr[0] | (ptr[1] << 8);
-	 //val &= 0x001f;
-	 //val &= 0x07e0;
-	 //val &= 
-         pxmatrix_drawPixelRGB565(display, xx, yy, val);
-         ptr += 2;
-      }
-   }
-   currentFrame++;
-   if (currentFrame >= frames)
-      currentFrame = 0;
-}
-
-//#define DISPLAY_TIMER_PERIOD_US        500
-#define DISPLAY_TIMER_PERIOD_US        1000
-//#define DISPLAY_TIMER_PERIOD_US        2000
-
-void display_task(void *pvParameter)
-{
-   esp_timer_handle_t timer_handle;
-   display = Create_PxMatrix3(32, 16, P_LAT, P_OE, P_A, P_B, P_C);
-   pxmatrix_begin(display, 8);
-   pxmatrix_clearDisplay(display);
-   pxmatrix_setFastUpdate(display, false);
-
-   // GPIO22
-   gpio_pad_select_gpio(GPIO_NUM_22);
-   gpio_set_direction(GPIO_NUM_22, GPIO_MODE_OUTPUT);
-   gpio_set_level(GPIO_NUM_22, 1);
-
-   //xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT, false, true, portMAX_DELAY);
-
-   // Init the Timer
-   esp_timer_create_args_t timer_conf = {
-        .callback = _display_timer_cb,
-        .arg = display,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "display_timer"
-    };
-    esp_err_t err = esp_timer_create(&timer_conf, &timer_handle);
-    if (err) {
-         printf("error starting esp_timer: %d\n", err);
-        return;
-    }
-    esp_timer_start_periodic(timer_handle, DISPLAY_TIMER_PERIOD_US);
-
-   int taskCore = xPortGetCoreID();
-   printf("display task running on %d\n", taskCore);
-   //pxmatrix_selectBuffer(display, false);
-   draw_anim(display, currentAnimation);
-   //pxmatrix_selectBuffer(display, true);
-   //draw_anim(display, 0);
-  
-   size_t cnt = 0; 
-   while (true) {
-      //vTaskDelay(1000 / portTICK_PERIOD_MS);
-      //vTaskDelay(200 / portTICK_PERIOD_MS);
-      //vTaskDelay(100 / portTICK_PERIOD_MS);
-      //vTaskDelay(66 / portTICK_PERIOD_MS);
-      vTaskDelay(33 / portTICK_PERIOD_MS);
-      
-      pxmatrix_swapBuffer(display);
-      draw_anim(display, currentAnimation);
-
-      if (currentFrame == 0) {
-         currentAnimation++;
-
-         if (currentAnimation > animation_count) {
-            currentAnimation = 0;
-	 }
-      }
-      
-   }
-}
+TaskHandle_t xTaskBorderRouter ;
 
 static void IRAM_ATTR sd_gpio_isr_handler(void* arg)
 {
-    uint32_t gpio_num = (uint32_t) arg;
-    xQueueSendFromISR(sd_gpio_evt_queue, &gpio_num, NULL);
+   uint32_t gpio_num = (uint32_t) arg;
+   BaseType_t xHigherPriorityTaskWoken;
+     
+   /* We have not woken a task at the start of the ISR. */
+   xHigherPriorityTaskWoken = pdFALSE;
+
+   xQueueSendFromISR(sd_gpio_evt_queue, &gpio_num, &xHigherPriorityTaskWoken);
+
+   if( xHigherPriorityTaskWoken )
+   {
+      /* Actual macro used here is port specific. */
+     portYIELD_FROM_ISR();
+   }
 }
 
 void test_sd()
@@ -254,7 +149,7 @@ void test_sd()
     // Please check its source code and implement error recovery when developing
     // production applications.
     sdmmc_card_t* card;
-    esp_err_t ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
+    esp_err_t ret = esp_vfs_fat_sdmmc_mount("/mnt/sd", &host, &slot_config, &mount_config, &card);
 
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
@@ -273,32 +168,33 @@ void test_sd()
     // Use POSIX and C standard library functions to work with files.
     // First create a file.
     ESP_LOGI(SD_TAG, "Opening file");
-    FILE* f = fopen("/sdcard/hello.txt", "w");
+    FILE* f = fopen("/mnt/sd/hello.txt", "w");
     if (f == NULL) {
         ESP_LOGE(SD_TAG, "Failed to open file for writing");
         return;
     }
     fprintf(f, "Hello %s!\n", card->cid.name);
     fclose(f);
-    ESP_LOGI(TAG, "File written");
+    ESP_LOGI(SD_TAG, "File written");
 
     // Check if destination file exists before renaming
     struct stat st;
-    if (stat("/sdcard/foo.txt", &st) == 0) {
+    if (stat("/mnt/sd/foo.txt", &st) == 0) {
         // Delete it if it exists
-        unlink("/sdcard/foo.txt");
+        unlink("/mnt/sd/foo.txt");
+        ESP_LOGI(SD_TAG, "Deleting File");
     }
 
     // Rename original file
     ESP_LOGI(SD_TAG, "Renaming file");
-    if (rename("/sdcard/hello.txt", "/sdcard/foo.txt") != 0) {
+    if (rename("/mnt/sd/hello.txt", "/mnt/sd/foo.txt") != 0) {
         ESP_LOGE(SD_TAG, "Rename failed");
         return;
     }
 
     // Open renamed file for reading
     ESP_LOGI(SD_TAG, "Reading file");
-    f = fopen("/sdcard/foo.txt", "r");
+    f = fopen("/mnt/sd/foo.txt", "r");
     if (f == NULL) {
         ESP_LOGE(SD_TAG, "Failed to open file for reading");
         return;
@@ -314,8 +210,8 @@ void test_sd()
     ESP_LOGI(SD_TAG, "Read from file: '%s'", line);
 
     // All done, unmount partition and disable SDMMC or SPI peripheral
-    esp_vfs_fat_sdmmc_unmount();
-    ESP_LOGI(SD_TAG, "Card unmounted");
+    //esp_vfs_fat_sdmmc_unmount();
+    //ESP_LOGI(SD_TAG, "Card unmounted");
 }
 
 void sd_task(void *pvParameter)
@@ -375,6 +271,172 @@ void adc_task(void *pvParameter)
     vTaskDelete(NULL);
 }
 
+static void initialize_console()
+{
+   /* Disable buffering on stdin and stdout */
+   setvbuf(stdin, NULL, _IONBF, 0);
+   setvbuf(stdout, NULL, _IONBF, 0);
+
+   /* Minicom, screen, idf_monitor send CR when ENTER key is pressed */
+   esp_vfs_dev_uart_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+   /* Move the caret to the beginning of the next line on '\n' */
+   esp_vfs_dev_uart_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
+
+   /* Install UART Driver for interrupt-driven reads and writes */
+   ESP_ERROR_CHECK( uart_driver_install(CONFIG_CONSOLE_UART_NUM, 256, 0, 0, NULL, 0) );
+
+   /* Tell VFS to use UART driver */
+   esp_vfs_dev_uart_use_driver(CONFIG_CONSOLE_UART_NUM);
+
+   /* Initialize the console */
+   esp_console_config_t console_config = {
+      .max_cmdline_args = 8,
+      .max_cmdline_length = 256,
+#if CONFIG_LOG_COLORS
+      .hint_color = atoi(LOG_COLOR_CYAN)
+#endif
+   };
+   ESP_ERROR_CHECK( esp_console_init(&console_config) );
+
+   /* Configure linenoise line completion library */
+   /* Enable multiline editing. IF not set, long commands will scroll within
+    * single line.
+    */
+   linenoiseSetMultiLine(1);
+
+   /* Tell linenoise where to get command completion and hints */
+   linenoiseSetCompletionCallback(&esp_console_get_completion);
+   linenoiseSetHintsCallback((linenoiseHintsCallback*) &esp_console_get_hint);
+
+   /* Set command history size */
+   linenoiseHistorySetMaxLen(100);
+
+#if CONFIG_STORE_HISTORY
+   linenoiseHistoryLoad(HISTORY_PATH);
+#endif
+}
+
+void console_task(void *pvParameter)
+{
+   initialize_console();
+   
+   esp_console_register_help_command();
+   register_display();
+   register_fs();
+   register_system();
+   register_wifi();
+   
+   const char *prompt = LOG_COLOR_I "esp32> " LOG_RESET_COLOR;
+
+   for (;;) {
+      char *line = linenoise(prompt);
+      if (line == NULL) { /* Ignore empty line */
+         continue;
+      }
+
+      /* Add the command to history */
+      linenoiseHistoryAdd(line);
+#if CONFIG_STORE_HISTORY
+      linenoiseHistorySave(HISOTRY_PATH);
+#endif
+
+      /* Try to run the command */
+      int ret;
+      esp_err_t err = esp_console_run(line, &ret);
+      if (err == ESP_ERR_NOT_FOUND) {
+         printf("Unrecognized command\n");
+      } else if (err == ESP_ERR_INVALID_ARG) {
+         // command was empty
+      } else if (err == ESP_OK && ret != ESP_OK) {
+         printf("Command returned non-zero error code: 0x%x (%s)\n", ret, esp_err_to_name(err));
+      } else if (err != ESP_OK) {
+          printf("Internal error: %s\n", esp_err_to_name(err));
+      }
+
+      /* linenoise allocates line buffer on the heap, so need to free it */
+      linenoiseFree(line);
+   }
+}
+
+/********************************************************************************
+ * HTTP Server Callbacks and Methods
+ ********************************************************************************/
+
+/* This handler gets the present value of the display mode */
+esp_err_t mode_get_handler(httpd_req_t *req)
+{
+    char outbuf[50];
+
+    /* Respond with the accumulated value */
+    snprintf(outbuf, sizeof(outbuf),"%u", display_getMode());
+    httpd_resp_send(req, outbuf, strlen(outbuf));
+    return ESP_OK;
+}
+
+/* This handler sets the value of the mode */
+esp_err_t mode_put_handler(httpd_req_t *req)
+{
+    char buf[10];
+    char outbuf[50];
+    int  ret;
+
+    /* Read data received in the request */
+    ret = httpd_req_recv(req, buf, sizeof(buf));
+    if (ret <= 0) {
+        return ESP_FAIL;
+    }
+
+    buf[ret] = '\0';
+    int val = atoi(buf);
+    ESP_LOGI(HTTP_TAG, "/mode PUT handler read %d", val);
+
+
+    display_setMode((display_mode_e) val);
+
+    /* Respond with the reset value */
+    snprintf(outbuf, sizeof(outbuf),"%d", val);
+    httpd_resp_send(req, outbuf, strlen(outbuf));
+    return ESP_OK;
+}
+
+httpd_uri_t mode_get = {
+    .uri      = "/mode",
+    .method   = HTTP_GET,
+    .handler  = mode_get_handler
+};
+
+httpd_uri_t mode_put = {
+    .uri      = "/mode",
+    .method   = HTTP_PUT,
+    .handler  = mode_put_handler
+};
+
+httpd_handle_t start_webserver(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    // Start the httpd server
+    ESP_LOGI(HTTP_TAG, "Starting server on port: '%d'", config.server_port);
+    httpd_handle_t server;
+
+    if (httpd_start(&server, &config) == ESP_OK) {
+        // Set URI handlers
+        ESP_LOGI(HTTP_TAG, "Registering URI handlers");
+        httpd_register_uri_handler(server, &mode_get);
+        httpd_register_uri_handler(server, &mode_put);
+        //httpd_register_uri_handler(server, &adder_post);
+        return server;
+    }
+
+    ESP_LOGI(HTTP_TAG, "Error starting server!");
+    return NULL;
+}
+
+void stop_webserver(httpd_handle_t server)
+{
+    // Stop the httpd server
+    httpd_stop(server);
+}
+
 /********************************************************************************
  * WiFi Callbacks and Methods
  ********************************************************************************/
@@ -382,12 +444,16 @@ void adc_task(void *pvParameter)
 esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
 {
    wifi_mode_t mode;
-   
+   app_context_t *context = (app_context_t *)ctx;
+
    switch (event->event_id) {
    case SYSTEM_EVENT_STA_START:
-      ESP_LOGI(TAG, "STA_START");
+      ESP_LOGI(WIFI_TAG, "STA_START");
       xEventGroupSetBits(wifi_event_group, STARTED_BIT);
-      ESP_ERROR_CHECK( esp_wifi_connect() );
+      esp_err_t err = esp_wifi_connect();
+      if (ESP_ERR_WIFI_SSID == err) {
+         ESP_LOGI(WIFI_TAG, "No Station Configuration");
+      }
       break;
    case SYSTEM_EVENT_STA_GOT_IP:
    {
@@ -412,6 +478,10 @@ esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
          info.sta_ssid_len = gl_sta_ssid_len;
          esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, 0, &info);
       }
+
+      //if (context->httpd == NULL) {
+      //   context->httpd = start_webserver();
+      //}
    }
       break;
    case SYSTEM_EVENT_STA_CONNECTED:
@@ -428,6 +498,12 @@ esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
       memset(gl_sta_bssid, 0, 6);
       gl_sta_ssid_len = 0;
 
+      //if (context->httpd) {
+      //   stop_webserver(context->httpd);
+      //   context->httpd = NULL;
+      //}
+
+      ESP_LOGI(WIFI_TAG, "STA_DISCONNECTED");
       esp_wifi_connect();
       xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
       break;
@@ -481,24 +557,25 @@ esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
    return ESP_OK;
 }
 
-void wifi_conn_init(void)
+void wifi_conn_init(app_context_t *context)
 {
    tcpip_adapter_init();
    wifi_event_group = xEventGroupCreate();
-   ESP_ERROR_CHECK( esp_event_loop_init(wifi_event_handler, NULL) );
+   ESP_ERROR_CHECK( esp_event_loop_init(wifi_event_handler, context) );
    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
    ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
-   ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
+   ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_FLASH) );
    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
-   wifi_config_t sta_config = {
+   /*wifi_config_t sta_config = {
       .sta = {
          .ssid = "joshua",
          .password = "woprwopr",
       }
    };
-   ESP_ERROR_CHECK( esp_wifi_set_config(WIFI_IF_STA, &sta_config) );
+   ESP_ERROR_CHECK( esp_wifi_set_config(WIFI_IF_STA, &sta_config) );*/
    ESP_ERROR_CHECK( esp_wifi_start() );
 }
+
 
 
 /********************************************************************************
@@ -795,10 +872,175 @@ void ble_init(void)
 /********************************************************************************
  * Main Function
  ********************************************************************************/
+//On reception of a message, echo it back verbatim
+void myEchoWebsocketRecv(Websock *ws, char *data, int len, int flags) {
+	printf("EchoWs: echo, len=%d\n", len);
+	cgiWebsocketSend(&httpdInstance.httpdInstance,
+	                 ws, data, len, flags);
+}
+
+//Echo websocket connected. Install reception handler.
+void myEchoWebsocketConnect(Websock *ws) {
+	printf("EchoWs: connect\n");
+	ws->recvCb=myEchoWebsocketRecv;
+}
+
+//Broadcast the uptime in seconds every second over connected websockets
+static void websocketBcast(void *arg) {
+	static int ctr=0;
+	char buff[128];
+	while(1) {
+		ctr++;
+		sprintf(buff, "Up for %d minutes %d seconds!\n", ctr/60, ctr%60);
+		cgiWebsockBroadcast(&httpdInstance.httpdInstance,
+		                    "/websocket/ws.cgi", buff, strlen(buff),
+		                    WEBSOCK_FLAG_NONE);
+
+		vTaskDelay(1000/portTICK_RATE_MS);
+	}
+}
+
+//On reception of a message, send "You sent: " plus whatever the other side sent
+static void myApiRecv(Websock *ws, char *data, int len, int flags) {
+	int status = 0;
+	//cgiWebsocketSend(&httpdInstance.httpdInstance,
+	//                 ws, buff, strlen(buff), WEBSOCK_FLAG_NONE);
+
+
+   // Let's Parse This
+   cJSON *cmd = cJSON_Parse(data);
+   if (NULL == cmd) {
+      status = -1;
+      goto finish;
+   }
+
+   const cJSON *item = cJSON_GetObjectItemCaseSensitive(cmd, "command");
+   if (!cJSON_IsString(item) || (item->valuestring == NULL))
+   {
+      status = -2;
+      goto finish;
+   }
+
+   // Process The Command
+   if (strncmp(item->valuestring, "display", 8) == 0) {
+      // Turn The Display On / Off
+      // Set Up The Brightness & Rate
+
+      const cJSON *pwrJson = cJSON_GetObjectItemCaseSensitive(cmd, "power");
+      if (!cJSON_IsBool(pwrJson))
+      {
+         status = -3;
+         goto finish;
+      }
+      bool power = cJSON_IsTrue(pwrJson);
+
+      const cJSON *brightnessJson = cJSON_GetObjectItemCaseSensitive(cmd, "brightness");
+      if (!cJSON_IsNumber(brightnessJson) || 
+          BRIGHTNESS_MIN > brightnessJson->valueint || 
+          BRIGHTNESS_MAX < brightnessJson->valueint) 
+      {
+         status = -4;
+         goto finish;
+      }
+      int brightness = brightnessJson->valueint;
+
+      const cJSON *rateJson = cJSON_GetObjectItemCaseSensitive(cmd, "rate");
+      if (!cJSON_IsNumber(rateJson) ||
+          RATE_MIN > rateJson->valueint ||
+          RATE_MAX < rateJson->valueint) {
+         status = -5;
+         goto finish;
+      }
+      int rate = rateJson->valueint;
+
+      // Actually Issue The Command
+      display_setPower(power);
+      display_setBrightness(brightness, rate);
+   } else if (strncmp(item->valuestring, "animation", 10) == 0) {
+      // Set Animation Mode + Number
+      const cJSON *animationJson = cJSON_GetObjectItemCaseSensitive(cmd, "animation");
+      if (!cJSON_IsNumber(animationJson) || 
+          0 > animationJson->valueint) 
+      {
+         status = -6;
+         goto finish;
+      }
+      display_setAnimation(animationJson->valueint);
+      display_setMode(DISPLAY_MODE_ANIMATION);
+   } else if (strncmp(item->valuestring, "colour", 7) == 0) {
+      // Set Colour Mode + Colour
+      const cJSON *colourJson = cJSON_GetObjectItemCaseSensitive(cmd, "colour");
+      if (!cJSON_IsString(colourJson) || 
+          6 != strlen(colourJson->valuestring))
+      {
+         status = -7;
+         goto finish;
+      }
+
+      // check that all of the characters are allowed
+      const char *end;
+      long int colour = strtol(colourJson->valuestring, (char **)&end, 16); 
+      if (end != colourJson->valuestring + 6) {
+         status = -8;
+         goto finish;
+      }
+
+      uint8_t r = (uint8_t)(colour >> 16);
+      uint8_t g = (uint8_t)(colour >> 8);
+      uint8_t b = (uint8_t)(colour);
+
+      display_setColour(r, g, b);
+      display_setMode(DISPLAY_MODE_COLOUR);
+   } else if (strncmp(item->valuestring, "file", 5) == 0) {
+      // Set File Mode + File Name
+      const cJSON *fileJson = cJSON_GetObjectItemCaseSensitive(cmd, "file");
+      if (!cJSON_IsString(fileJson) || 
+          0 >= strlen(fileJson->valuestring)) 
+      {
+         status = -9;
+         goto finish;
+      }
+      display_setFile(fileJson->valuestring);
+      display_setMode(DISPLAY_MODE_FILE);
+   } 
+
+finish:
+   if (NULL != cmd) {
+      cJSON_Delete(cmd);
+   }
+
+   cJSON *result = cJSON_CreateObject();
+   cJSON_AddNumberToObject(result, "status", status);
+   char *sResult = cJSON_PrintUnformatted(result);
+   cJSON_Delete(result);
+   cgiWebsocketSend(&httpdInstance.httpdInstance,
+	                 ws, sResult, strlen(sResult), WEBSOCK_FLAG_NONE);
+   free(sResult);
+}
+
+//Websocket connected. Install reception handler and send welcome message.
+static void myApiConnect(Websock *ws) {
+	ws->recvCb=myApiRecv;
+	cgiWebsocketSend(&httpdInstance.httpdInstance,
+	                 ws, "{\"status\": 0}", 14, WEBSOCK_FLAG_NONE);
+}
+
+HttpdBuiltInUrl builtInUrls[]={
+   ROUTE_REDIRECT("/", "/index.html"),
+	ROUTE_CGI("/flash/reboot", cgiRebootFirmware),
+   //	{"/wifi/*", authBasic, myPassFn},
+   //ROUTE_WS("/websocket/ws.cgi", myWebsocketConnect),
+   ROUTE_WS("/api", myApiConnect),
+	ROUTE_FILESYSTEM(),
+	ROUTE_END()
+};
 
 void app_main()
 {
    esp_err_t ret;
+   static app_context_t context;
+
+   context.httpd = NULL;
 
    ret = nvs_flash_init();
    if (ret == ESP_ERR_NVS_NO_FREE_PAGES) {
@@ -810,46 +1052,36 @@ void app_main()
    // Configure The GPIO Stuff
    gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
 
-    // Print chip information
-    esp_chip_info_t chip_info;
-    esp_chip_info(&chip_info);
-    printf("This is ESP32 chip with %d CPU cores, WiFi%s%s, ",
+   // Print chip information
+   esp_chip_info_t chip_info;
+   esp_chip_info(&chip_info);
+   printf("This is ESP32 chip with %d CPU cores, WiFi%s%s, ",
             chip_info.cores,
             (chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "",
             (chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : "");
 
-    printf("silicon revision %d, ", chip_info.revision);
+   printf("silicon revision %d, ", chip_info.revision);
 
-    printf("%dMB %s flash\n", spi_flash_get_chip_size() / (1024 * 1024),
+   printf("%dMB %s flash\n", spi_flash_get_chip_size() / (1024 * 1024),
             (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
-
 
    //wifi_conn_init();
 
-   /*xTaskCreatePinnedToCore(
+   xTaskCreatePinnedToCore(
       display_task, 
       "display_task", 
       4096, 
       NULL, 
       1, 
       &xTask1,
-      1);*/
-
-
-   xTaskCreate(
-      &display_task, 
-      "display_task", 
-      4096, 
-      NULL, 
-      configMAX_PRIORITIES, 
-      &xTask1);
+      1);
 
    xTaskCreate(
       &sd_task,
       "sd_task",
       4096,
       NULL,
-      configMAX_PRIORITIES - 1,
+      configMAX_PRIORITIES - 2,
       &xTask2);
 
 /*   xTaskCreate(
@@ -857,21 +1089,32 @@ void app_main()
       "adc_task",
       2048,
       NULL,
-      configMAX_PRIORITIES - 2,
+      configMAX_PRIORITIES - 3,
       &xTask2);
 */
    
+   xTaskCreate(
+      &console_task,
+      "console_task",
+      4096,
+      NULL,
+      configMAX_PRIORITIES - 1,
+      &xTaskBorderRouter);
+   
 
-   wifi_conn_init();
+   wifi_conn_init(&context);
+   
+   espFsInit((void*)(webpages_espfs_start));
+   httpdFreertosInit(&httpdInstance,
+                   builtInUrls,
+                   LISTEN_PORT,
+                   connectionMemory,
+                   MAX_CONNECTIONS,
+                   HTTPD_FLAG_NONE);
+   httpdFreertosStart(&httpdInstance);
+
    ble_init();
 
-/*
-    for (int i = 10; i >= 0; i--) {
-        printf("Restarting in %d seconds...\n", i);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
-    printf("Restarting now.\n");
-    fflush(stdout);
-    esp_restart();
-*/
+   xTaskCreate(websocketBcast, "wsbcast", 3000, NULL, 3, NULL);
+   
 }

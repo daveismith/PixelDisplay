@@ -29,7 +29,7 @@ config DISPLAY_SCAN
 config DISPLAY_GPIO_STB_LAT
    int "Display STB/LAT GPIO"
    range 0 34
-   default 22
+   default 26
    help 
       GPIO number (IOxx) connected to the STB or LAT pin of the PX display.
 
@@ -40,7 +40,7 @@ config DISPLAY_GPIO_STB_LAT
 config DISPLAY_GPIO_A
    int "Display A GPIO"
    range 0 34
-   default 19
+   default 27
    help 
       GPIO number (IOxx) connected to the A pin of the PX display.
 
@@ -51,7 +51,7 @@ config DISPLAY_GPIO_A
 config DISPLAY_GPIO_B
    int "Display B GPIO"
    range 0 34
-   default 23
+   default 17
    help 
       GPIO number (IOxx) connected to the B pin of the PX display.
 
@@ -62,7 +62,7 @@ config DISPLAY_GPIO_B
 config DISPLAY_GPIO_C
    int "Display C GPIO" if DISPLAY_SCAN_8 || DISPLAY_SCAN_16 || DISPLAY_SCAN_32
    range 0 34
-   default 18
+   default 25
    help 
       GPIO number (IOxx) connected to the C pin of the PX display. This is only used if the display scan layout is set to 8, 16, or 32.
 
@@ -95,7 +95,7 @@ config DISPLAY_GPIO_E
 config DISPLAY_GPIO_P_OE
    int "Display P_OE GPIO"
    range 0 34
-   default 2
+   default 21
    help 
       GPIO number (IOxx) connected to the OE pin of the PX display.
 
@@ -106,7 +106,7 @@ config DISPLAY_GPIO_P_OE
 config DISPLAY_GPIO_CLK
    int "Display CLK GPIO"
    range 0 34
-   default 14
+   default 18
    help 
       GPIO number (IOxx) connected to the CLK pin of the PX display.
 
@@ -117,6 +117,17 @@ config DISPLAY_GPIO_CLK
 config DISPLAY_GPIO_R0
    int "Display R0/RD1 GPIO"
    range 0 34
+   default 23
+   help 
+      GPIO number (IOxx) connected to the R0 or RD1 pin of the PX display.
+
+      Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
+
+      GPIOs 35-39 are input-only so cannot be used as outputs
+
+config DISPLAY_GPIO_POWER
+   int "Display Power Control GPIO"
+   range 0 34
    default 22
    help 
       GPIO number (IOxx) connected to the R0 or RD1 pin of the PX display.
@@ -124,5 +135,5 @@ config DISPLAY_GPIO_R0
       Some GPIOs are used for other purposes (flash connections, etc.) and cannot be used for display control.
 
       GPIOs 35-39 are input-only so cannot be used as outputs
-   
+
 endmenu

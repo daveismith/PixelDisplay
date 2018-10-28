@@ -4,7 +4,8 @@
 #
 
 #EXTRA_COMPONENT_DIRS := PxMatrix
-PROJECT_NAME := hello-world
+EXTRA_COMPONENT_DIRS := libesphttpd
+PROJECT_NAME := pixel-display
 
 include $(IDF_PATH)/make/project.mk
 

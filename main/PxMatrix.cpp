@@ -454,7 +454,7 @@ void PxMatrix::display(uint16_t show_time)
          _transactions[0].flags = SPI_TRANS_USE_RXDATA;
          _transactions[0].tx_buffer = &(buffer[buffer_idx][offset]);
 
-	 ets_delay_us(100);
+	 //ets_delay_us(100);
          ret = spi_device_queue_trans(spi, &_transactions[0], portMAX_DELAY);
          ESP_ERROR_CHECK(ret);
          ret = spi_device_get_trans_result(spi, &rtrans, portMAX_DELAY);

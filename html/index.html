@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>WebSocket Test</title>
+</head>
+<body>
+<h2>WebSocket Test</h2>
+
+<div id="output"></div>
+
+<button onClick="togglePower();">Toggle Power</button><br />
+<input type="number" id="brightness" min="0" max="2100" value="2100" /> <button onClick="updateBrightness();">Set Brightness</button><br />
+<input type="number" id="animation" min="0" max="2" value="0" /> <button onClick="updateAnimation();">Set Animation</button><br />
+<input type="text" id="colour" size="6" maxlength="6" /> <button onClick="updateColour();">Set Colour</button><br />
+<input type="text" id="fileName" /> <button onClick="updateFile();">Set File</button>
+
+<script language="javascript" type="text/javascript">
+
+  var wsUri = "ws://"+window.location.host+"/api";
+  var output;
+
+  var stat = {
+	  power: true,
+     brightness: 2100,
+     rate: 30,
+     animation: 0
+  };
+
+  function init()
+  {
+    output = document.getElementById("output");
+    testWebSocket();
+  }
+
+  function testWebSocket()
+  {
+    websocket = new WebSocket(wsUri);
+    websocket.onopen = function(evt) { onOpen(evt) };
+    websocket.onclose = function(evt) { onClose(evt) };
+    websocket.onmessage = function(evt) { onMessage(evt) };
+    websocket.onerror = function(evt) { onError(evt) };
+  }
+
+  function onOpen(evt)
+  {
+    writeToScreen("CONNECTED");
+  }
+
+  function onClose(evt)
+  {
+    writeToScreen("DISCONNECTED");
+  }
+
+  function onMessage(evt)
+  {
+    writeToScreen('<span style="color: blue;">RECEIVED: ' + evt.data+'</span>');
+//    websocket.close();
+  }
+
+  function onError(evt)
+  {
+    writeToScreen('<span style="color: red;">ERROR:</span> ' + evt.data);
+  }
+
+  function doSend(message)
+  {
+    writeToScreen("SENT: " + message); 
+    websocket.send(message);
+  }
+
+  function writeToScreen(message)
+  {
+    var pre = document.createElement("p");
+    pre.style.wordWrap = "break-word";
+    pre.innerHTML = message;
+    output.appendChild(pre);
+  }
+
+  function togglePower() {
+      stat.power = !stat.power;
+      var cmd = {
+              'command': 'display', 
+              'power': stat.power, 
+              'brightness': stat.brightness, 
+              'rate': stat.rate 
+      };
+      doSend(JSON.stringify(cmd));
+  }
+
+   function updateBrightness() {
+      var brightness = document.getElementById("brightness");
+      stat.brightness = parseInt(brightness.value);
+      var cmd = {
+              'command': 'display', 
+              'power': stat.power, 
+              'brightness': stat.brightness, 
+              'rate': stat.rate 
+      };
+      doSend(JSON.stringify(cmd));
+   }
+
+   function updateAnimation() {
+      var animation = document.getElementById("animation");
+      stat.animation = parseInt(animation.value);
+      var cmd = {
+              'command': 'animation', 
+              'animation': stat.animation, 
+      };
+      doSend(JSON.stringify(cmd));
+   }
+
+   function updateColour() {
+      var colour = document.getElementById("colour");
+      stat.colour = colour.value;
+      var cmd = {
+              'command': 'colour', 
+              'colour': stat.colour, 
+      };
+      doSend(JSON.stringify(cmd));
+   }
+
+   function updateFile() {
+      var fileName = document.getElementById("fileName");
+      stat.file = fileName.value;
+      var cmd = {
+              'command': 'file',
+              'file': stat.file
+      };
+      doSend(JSON.stringify(cmd));
+   }
+
+   window.addEventListener("load", init, false);
+</script>
+</body>
