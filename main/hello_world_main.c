@@ -290,7 +290,7 @@ static void initialize_console()
 
    /* Initialize the console */
    esp_console_config_t console_config = {
-      .max_cmdline_args = 8,
+      .max_cmdline_args = 9,
       .max_cmdline_length = 256,
 #if CONFIG_LOG_COLORS
       .hint_color = atoi(LOG_COLOR_CYAN)
@@ -946,8 +946,8 @@ static void myApiRecv(Websock *ws, char *data, int len, int flags) {
 
       const cJSON *rateJson = cJSON_GetObjectItemCaseSensitive(cmd, "rate");
       if (!cJSON_IsNumber(rateJson) ||
-          RATE_MIN > rateJson->valueint ||
-          RATE_MAX < rateJson->valueint) {
+          DIM_RATE_MIN > rateJson->valueint ||
+          DIM_RATE_MAX < rateJson->valueint) {
          status = -5;
          goto finish;
       }
