@@ -584,81 +584,81 @@ void PxMatrix::displayTestPixel(uint16_t show_time)
 
 inline PxMatrix* real(pxmatrix *m) { return static_cast<PxMatrix*>(m); }
 
-extern pxmatrix* Create_PxMatrix(uint8_t width, uint8_t height, uint8_t LATCH, uint8_t OE, uint8_t A, uint8_t B) {
+pxmatrix* Create_PxMatrix(uint8_t width, uint8_t height, uint8_t LATCH, uint8_t OE, uint8_t A, uint8_t B) {
    return new PxMatrix(width, height, LATCH, OE, A, B);
 }
 
-extern pxmatrix* Create_PxMatrix3(uint8_t width, uint8_t height, uint8_t LATCH, uint8_t OE, uint8_t A, uint8_t B, uint8_t C)
+pxmatrix* Create_PxMatrix3(uint8_t width, uint8_t height, uint8_t LATCH, uint8_t OE, uint8_t A, uint8_t B, uint8_t C)
 {
    return new PxMatrix(width, height, LATCH, OE, A, B, C);
 }
 
-extern pxmatrix* Create_PxMatrix4(uint8_t width, uint8_t height, uint8_t LATCH, uint8_t OE, uint8_t A, uint8_t B, uint8_t C, uint8_t D)
+pxmatrix* Create_PxMatrix4(uint8_t width, uint8_t height, uint8_t LATCH, uint8_t OE, uint8_t A, uint8_t B, uint8_t C, uint8_t D)
 {
    return new PxMatrix(width, height, LATCH, OE, A, B, C, D);
 }
 
-extern pxmatrix* Create_PxMatrix5(uint8_t width, uint8_t height, uint8_t LATCH, uint8_t OE, uint8_t A, uint8_t B, uint8_t C, uint8_t D, uint8_t E)
+pxmatrix* Create_PxMatrix5(uint8_t width, uint8_t height, uint8_t LATCH, uint8_t OE, uint8_t A, uint8_t B, uint8_t C, uint8_t D, uint8_t E)
 {
    return new PxMatrix(width, height, LATCH, OE, A, B, C, D, E);
 }
 
-extern void pxmatrix_begin(pxmatrix *matrix, uint8_t steps)
+void pxmatrix_begin(pxmatrix *matrix, uint8_t steps)
 {
    real(matrix)->begin(steps);
 }
 
-extern void pxmatrix_clearDisplay(pxmatrix *matrix)
+void pxmatrix_clearDisplay(pxmatrix *matrix)
 {
    real(matrix)->clearDisplay();
 }
 
-extern void pxmatrix_display(pxmatrix *matrix, uint16_t show_time)
+void pxmatrix_display(pxmatrix *matrix, uint16_t show_time)
 {
    real(matrix)->display(show_time);
 }
 
-extern void pxmatrix_drawPixelRGB565(pxmatrix *matrix, int16_t x, int16_t y, uint16_t color)
+void pxmatrix_drawPixelRGB565(pxmatrix *matrix, int16_t x, int16_t y, uint16_t color)
 {
    real(matrix)->drawPixelRGB565(x, y, color);
 }
 
-extern void pxmatrix_drawPixel(pxmatrix *matrix, int16_t x, int16_t y, uint16_t color)
+void pxmatrix_drawPixel(pxmatrix *matrix, int16_t x, int16_t y, uint16_t color)
 {
    real(matrix)->drawPixel(x, y, color);
 }
 
-extern void pxmatrix_drawPixelRGB888(pxmatrix *matrix, int16_t x, int16_t y, uint8_t r, uint8_t g, uint8_t b)
+void pxmatrix_drawPixelRGB888(pxmatrix *matrix, int16_t x, int16_t y, uint8_t r, uint8_t g, uint8_t b)
 {
    real(matrix)->drawPixelRGB888(x, y, r, g, b);
 }
 
-extern uint16_t pxmatrix_color565(pxmatrix *matrix, uint8_t r, uint8_t g, uint8_t b)
+uint16_t pxmatrix_color565(pxmatrix *matrix, uint8_t r, uint8_t g, uint8_t b)
 {
    return real(matrix)->color565(r, g, b);
 }
 
-extern void pxmatrix_displayTestPattern(pxmatrix *matrix, uint16_t show_time)
+void pxmatrix_displayTestPattern(pxmatrix *matrix, uint16_t show_time)
 {
    real(matrix)->displayTestPattern(show_time);
 }
 
-extern void pxmatrix_displayTestPixel(pxmatrix *matrix, uint16_t show_time)
+void pxmatrix_displayTestPixel(pxmatrix *matrix, uint16_t show_time)
 {
    real(matrix)->displayTestPixel(show_time);
 }
 
-extern void pxmatrix_setFastUpdate(pxmatrix *matrix, bool fast_update)
+void pxmatrix_setFastUpdate(pxmatrix *matrix, bool fast_update)
 {
    real(matrix)->setFastUpdate(fast_update);
 }
 
-extern void pxmatrix_selectBuffer(pxmatrix *matrix, bool selected_buffer)
+void pxmatrix_selectBuffer(pxmatrix *matrix, bool selected_buffer)
 {
    real(matrix)->selectBuffer(selected_buffer);
 }
 
-extern void pxmatrix_swapBuffer(pxmatrix *matrix)
+void pxmatrix_swapBuffer(pxmatrix *matrix)
 {
    real(matrix)->swapBuffer();
 }
