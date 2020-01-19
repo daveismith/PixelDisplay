@@ -29,6 +29,9 @@
 #include "esp_spi_flash.h"
 
 #include "display.h"
+#define PROGMEM
+#include "Fonts/FreeSans9pt7b.h"
+#include "Fonts/Picopixel.h"
 
 #include "esp_blufi_api.h"
 #include "esp_bt_defs.h"
@@ -63,12 +66,21 @@
 
 #include <cJSON.h>
 
+#include <mdns.h>
+
+#include "lwip/apps/sntp.h"
+
 typedef struct {
    httpd_handle_t httpd;
 } app_context_t;
 
 static EventGroupHandle_t ble_event_group;
 EventGroupHandle_t wifi_event_group;
+static esp_timer_handle_t wifi_timer_handle;
+static size_t wifi_retry;
+
+#define WIFI_RETRY_PERIOD 15
+#define WIFI_MAX_RETRY_SECONDS 300
 
 static xQueueHandle sd_gpio_evt_queue = NULL;
 
@@ -78,9 +90,10 @@ static xQueueHandle sd_gpio_evt_queue = NULL;
 static char connectionMemory[sizeof(RtosConnType) * MAX_CONNECTIONS];
 static HttpdFreertosInstance httpdInstance;
 
-const int CONNECTED_BIT = BIT0; // Both BLE and WiFi
-const int STARTED_BIT = BIT1;
-const int BLE_ADV_BIT = BIT2;
+const int IP4_CONNECTED_BIT = BIT0; // Both BLE and WiFi
+const int IP6_CONNECTED_BIT = BIT1;
+const int STARTED_BIT = BIT2;
+const int BLE_ADV_BIT = BIT3;
 
 #define ESP_INTR_FLAG_DEFAULT 0
 
@@ -450,6 +463,7 @@ esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
    case SYSTEM_EVENT_STA_START:
       ESP_LOGI(WIFI_TAG, "STA_START");
       xEventGroupSetBits(wifi_event_group, STARTED_BIT);
+      wifi_retry = 0;   // Reset The Retry Counter
       esp_err_t err = esp_wifi_connect();
       if (ESP_ERR_WIFI_SSID == err) {
          ESP_LOGI(WIFI_TAG, "No Station Configuration");
@@ -459,7 +473,8 @@ esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
    {
       esp_blufi_extra_info_t info;
 
-      xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+      xEventGroupSetBits(wifi_event_group, IP4_CONNECTED_BIT);
+      wifi_retry = 0;
       esp_wifi_get_mode(&mode);
 
       /*
@@ -470,7 +485,7 @@ esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
       ip4_addr_t gw;
       */
 
-      if ((xEventGroupGetBits(ble_event_group) & CONNECTED_BIT) == CONNECTED_BIT) {
+      if ((xEventGroupGetBits(ble_event_group) & IP4_CONNECTED_BIT) == IP4_CONNECTED_BIT) {
          memset(&info, 0, sizeof(esp_blufi_extra_info_t));
          memcpy(info.sta_bssid, gl_sta_bssid, 6);
          info.sta_bssid_set = true;
@@ -484,11 +499,21 @@ esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
       //}
    }
       break;
+   case SYSTEM_EVENT_AP_STA_GOT_IP6:
+      xEventGroupSetBits(wifi_event_group, IP6_CONNECTED_BIT);
+      //ESP_LOGI(WIFI_TAG, "SYSTEM_EVENT_STA_GOT_IP6");
+      //char *ip6 = ip6addr_ntoa(&event->event_info.got_ip6.ip6_info.ip);
+      //ESP_LOGI(WIFI_TAG, "IPv6: %s", ip6);
+      break;
    case SYSTEM_EVENT_STA_CONNECTED:
       gl_sta_connected = true;
       memcpy(gl_sta_bssid, event->event_info.connected.bssid, 6);
       memcpy(gl_sta_ssid, event->event_info.connected.ssid, event->event_info.connected.ssid_len);
       gl_sta_ssid_len = event->event_info.connected.ssid_len;
+      esp_timer_stop( wifi_timer_handle );
+
+      ESP_LOGI(WIFI_TAG, "try to get ipv6");
+      tcpip_adapter_create_ip6_linklocal(TCPIP_ADAPTER_IF_STA);
       break;
    case SYSTEM_EVENT_STA_DISCONNECTED:
       /* This is a workaround as ESP32 WiFi libs don't currently
@@ -504,14 +529,22 @@ esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
       //}
 
       ESP_LOGI(WIFI_TAG, "STA_DISCONNECTED");
-      esp_wifi_connect();
-      xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+      esp_wifi_disconnect();
+      xEventGroupClearBits(wifi_event_group, IP4_CONNECTED_BIT | IP6_CONNECTED_BIT);
+
+      size_t idx = (1 << wifi_retry);
+      uint64_t timeout = idx * WIFI_RETRY_PERIOD;
+      ESP_LOGI(WIFI_TAG, "wifi retry multiplier: %zu, timeout: %"PRIu64"s", idx, timeout);
+      if (timeout > WIFI_MAX_RETRY_SECONDS)
+         timeout = WIFI_MAX_RETRY_SECONDS;
+
+      esp_timer_start_once( wifi_timer_handle, 1000 * 1000 * timeout);
       break;
    case SYSTEM_EVENT_AP_START:
       esp_wifi_get_mode(&mode);
 
       /* TODO: get config or information of softap, then set to report extra_info */
-      if ((xEventGroupGetBits(ble_event_group) & CONNECTED_BIT) == CONNECTED_BIT) {
+      if ((xEventGroupGetBits(ble_event_group) & IP4_CONNECTED_BIT) == IP4_CONNECTED_BIT) {
          if (gl_sta_connected) {  
             esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS, 0, NULL);
          } else {
@@ -554,7 +587,14 @@ esp_err_t wifi_event_handler(void *ctx, system_event_t *event)
    default:
       break;
    }
+   mdns_handle_system_event(context, event);   
    return ESP_OK;
+}
+
+static void _wifi_timer_cb(void *arg)
+{
+   esp_wifi_connect();
+   wifi_retry++;
 }
 
 void wifi_conn_init(app_context_t *context)
@@ -573,7 +613,24 @@ void wifi_conn_init(app_context_t *context)
       }
    };
    ESP_ERROR_CHECK( esp_wifi_set_config(WIFI_IF_STA, &sta_config) );*/
+
+   // Configure The Timer
+   esp_timer_create_args_t timer_conf = {
+      .callback = _wifi_timer_cb,
+	   .arg = NULL,
+	   .dispatch_method = ESP_TIMER_TASK,
+	   .name = "wifi_timer"
+   };
+   ESP_ERROR_CHECK( esp_timer_create(&timer_conf, &wifi_timer_handle) );
    ESP_ERROR_CHECK( esp_wifi_start() );
+
+   ESP_LOGI( WIFI_TAG, "Initializing SNTP");
+   sntp_setoperatingmode( SNTP_OPMODE_POLL );
+   sntp_setservername(0, "time.google.com");
+   sntp_init();
+
+   setenv("TZ", "EST5EDT,M3.2.0/2,M11.1.0", 1);
+   tzset();
 }
 
 
@@ -655,15 +712,15 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
         server_if = param->connect.server_if;
         conn_id = param->connect.conn_id;
         esp_ble_gap_stop_advertising();
-        xEventGroupSetBits(ble_event_group, CONNECTED_BIT);
+        xEventGroupSetBits(ble_event_group, IP4_CONNECTED_BIT);
         xEventGroupClearBits(wifi_event_group, BLE_ADV_BIT);
         blufi_security_init();
         break;
     case ESP_BLUFI_EVENT_BLE_DISCONNECT:
         BLUFI_INFO("BLUFI ble disconnect\n");
         blufi_security_deinit();
-        xEventGroupClearBits(ble_event_group, CONNECTED_BIT);
-        if ((xEventGroupGetBits(wifi_event_group) & CONNECTED_BIT) != CONNECTED_BIT) {
+        xEventGroupClearBits(ble_event_group, IP4_CONNECTED_BIT);
+        if ((xEventGroupGetBits(wifi_event_group) & IP4_CONNECTED_BIT) != IP4_CONNECTED_BIT) {
           esp_ble_gap_start_advertising(&example_adv_params);
           xEventGroupSetBits(wifi_event_group, BLE_ADV_BIT);
         }
@@ -675,7 +732,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
         BLUFI_INFO("BLUFI requset wifi connect to AP\n");
         /* there is no wifi callback when the device has already connected to this wifi
-        so disconnect wifi before connection.
+        so }disconnect wifi before connection.
         */
         esp_wifi_disconnect();
         esp_wifi_connect();
@@ -777,6 +834,7 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
             .channel = 0,
             .show_hidden = false
         };
+        ESP_ERROR_CHECK(esp_wifi_disconnect() );
         ESP_ERROR_CHECK(esp_wifi_scan_start(&scanConf, true));
         break;
     }
@@ -902,9 +960,10 @@ static void websocketBcast(void *arg) {
 
 //On reception of a message, send "You sent: " plus whatever the other side sent
 static void myApiRecv(Websock *ws, char *data, int len, int flags) {
-	int status = 0;
-	//cgiWebsocketSend(&httpdInstance.httpdInstance,
-	//                 ws, buff, strlen(buff), WEBSOCK_FLAG_NONE);
+   int status = 0;
+   int sequence = -1;
+   //cgiWebsocketSend(&httpdInstance.httpdInstance,
+   //                 ws, buff, strlen(buff), WEBSOCK_FLAG_NONE);
 
 
    // Let's Parse This
@@ -919,6 +978,15 @@ static void myApiRecv(Websock *ws, char *data, int len, int flags) {
    {
       status = -2;
       goto finish;
+   }
+
+   const cJSON *sequenceJson = cJSON_GetObjectItemCaseSensitive(cmd, "sequence");
+   if (!cJSON_IsNumber(sequenceJson) || sequenceJson->valueint < 0)
+   {
+      status = -15;
+      goto finish;
+   } else {
+      sequence = sequenceJson->valueint;
    }
 
    // Process The Command
@@ -1002,7 +1070,102 @@ static void myApiRecv(Websock *ws, char *data, int len, int flags) {
       }
       display_setFile(fileJson->valuestring);
       display_setMode(DISPLAY_MODE_FILE);
-   } 
+   } else if (strncmp(item->valuestring, "mode", 5) == 0) {
+      const cJSON *modeJson = cJSON_GetObjectItemCaseSensitive(cmd, "mode");
+      if (!cJSON_IsNumber(modeJson) || 
+          0 > modeJson->valueint ||
+	  DISPLAY_MODE_END <= modeJson->valueint)
+
+      {
+         status = -10;
+         goto finish;
+      }
+      display_setMode((display_mode_e) modeJson->valueint);
+   } else if (strncmp(item->valuestring, "setPixel",9) == 0) {
+      // Set Colour Mode + Colour
+      const cJSON *colourJson = cJSON_GetObjectItemCaseSensitive(cmd, "colour");
+      if (!cJSON_IsString(colourJson) || 
+          6 != strlen(colourJson->valuestring))
+      {
+         status = -11;
+         goto finish;
+      }
+
+      const cJSON *xJson = cJSON_GetObjectItemCaseSensitive(cmd, "x");
+      if (!cJSON_IsNumber(xJson) || 
+          0 > xJson->valueint ||
+	  32 <= xJson->valueint)
+
+      {
+         status = -12;
+         goto finish;
+      }
+
+      const cJSON *yJson = cJSON_GetObjectItemCaseSensitive(cmd, "y");
+      if (!cJSON_IsNumber(yJson) || 
+          0 > yJson->valueint ||
+	  16 <= yJson->valueint)
+
+      {
+         status = -13;
+         goto finish;
+      }
+
+      // check that all of the characters are allowed
+      const char *end;
+      long int colour = strtol(colourJson->valuestring, (char **)&end, 16); 
+      if (end != colourJson->valuestring + 6) {
+         status = -14;
+         goto finish;
+      }
+
+      uint8_t r = (uint8_t)(colour >> 16);
+      uint8_t g = (uint8_t)(colour >> 8);
+      uint8_t b = (uint8_t)(colour);
+
+      //display_setColour(r, g, b);
+      //display_setMode(DISPLAY_MODE_COLOUR);
+      display_setPixel(xJson->valueint, yJson->valueint, r, g, b);
+      display_update();
+   } else if (strncmp(item->valuestring, "getFrame", 9) == 0) {
+      const cJSON *fileJson = cJSON_GetObjectItemCaseSensitive(cmd, "file");
+      if (!cJSON_IsString(fileJson) || 
+          0 >= strlen(fileJson->valuestring)) 
+      {
+         status = -15;
+         goto finish;
+      }
+
+      const cJSON *frameJson = cJSON_GetObjectItemCaseSensitive(cmd, "animation");
+      if (!cJSON_IsNumber(frameJson) || 
+          0 > frameJson->valueint) 
+      {
+         status = -16;
+         goto finish;
+      }
+
+      // Actually Pull The Frame Pixels
+   } else if (strncmp(item->valuestring, "setFont", 8) == 0) {
+      size_t x1, y1, w, h;
+      char *text = "hello";
+      display_setFont(&Picopixel);
+      //display_setFont(&FreeSans9pt7b);  
+
+
+      display_getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+      printf("x1: %zu, y1: %zu, w: %zu, h: %zu\r\n", x1, y1, w, h);
+   } else if (strncmp(item->valuestring, "print", 6) == 0) {
+      const cJSON *textJson = cJSON_GetObjectItemCaseSensitive(cmd, "text");
+      if (!cJSON_IsString(textJson) || 
+          0 >= strlen(textJson->valuestring)) 
+      {
+         status = -16;
+         goto finish;
+      }
+
+      display_print(textJson->valuestring);
+      display_update();
+   }
 
 finish:
    if (NULL != cmd) {
@@ -1011,6 +1174,7 @@ finish:
 
    cJSON *result = cJSON_CreateObject();
    cJSON_AddNumberToObject(result, "status", status);
+   cJSON_AddNumberToObject(result, "sequence", sequence);
    char *sResult = cJSON_PrintUnformatted(result);
    cJSON_Delete(result);
    cgiWebsocketSend(&httpdInstance.httpdInstance,
@@ -1034,6 +1198,19 @@ HttpdBuiltInUrl builtInUrls[]={
 	ROUTE_FILESYSTEM(),
 	ROUTE_END()
 };
+
+void start_mdns_service() 
+{
+   esp_err_t err = mdns_init();
+   if (err) {
+        printf("MDNS Init failed: %d\n", err);
+        return;
+   }
+
+   ESP_ERROR_CHECK( mdns_hostname_set("my-esp32") );
+   ESP_ERROR_CHECK( mdns_instance_name_set("David's ESP32 Thing") );
+   ESP_ERROR_CHECK( mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0) );
+}
 
 void app_main()
 {
@@ -1072,7 +1249,7 @@ void app_main()
       "display_task", 
       4096, 
       NULL, 
-      1, 
+      configMAX_PRIORITIES - 4, 
       &xTask1,
       1);
 
@@ -1081,7 +1258,7 @@ void app_main()
       "sd_task",
       4096,
       NULL,
-      configMAX_PRIORITIES - 2,
+      configMAX_PRIORITIES - 5,
       &xTask2);
 
 /*   xTaskCreate(
@@ -1089,7 +1266,7 @@ void app_main()
       "adc_task",
       2048,
       NULL,
-      configMAX_PRIORITIES - 3,
+      configMAX_PRIORITIES - 6,
       &xTask2);
 */
    
@@ -1098,9 +1275,9 @@ void app_main()
       "console_task",
       4096,
       NULL,
-      configMAX_PRIORITIES - 1,
+      configMAX_PRIORITIES - 6,
       &xTaskBorderRouter);
-   
+
 
    wifi_conn_init(&context);
    
@@ -1114,7 +1291,9 @@ void app_main()
    httpdFreertosStart(&httpdInstance);
 
    ble_init();
+   start_mdns_service();
 
-   xTaskCreate(websocketBcast, "wsbcast", 3000, NULL, 3, NULL);
+   display_setFont(&Picopixel);
+   //xTaskCreate(websocketBcast, "wsbcast", 3000, NULL, 3, NULL);
    
 }

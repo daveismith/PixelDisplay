@@ -22,6 +22,7 @@
 #include "freertos/task.h"
 #include "soc/rtc_cntl_reg.h"
 #include "sdkconfig.h"
+#include <time.h>
 
 #ifdef CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS
 #define WITH_TASKS_INFO 1
@@ -29,6 +30,7 @@
 
 static void register_free();
 static void register_restart();
+static void register_date();
 #if WITH_TASKS_INFO
 static void register_tasks();
 #endif
@@ -37,6 +39,7 @@ void register_system()
 {
     register_free();
     register_restart();
+    register_date();
 #if WITH_TASKS_INFO
     register_tasks();
 #endif
@@ -76,6 +79,26 @@ static void register_free()
         .help = "Get the total size of heap memory available",
         .hint = NULL,
         .func = &free_mem,
+    };
+    ESP_ERROR_CHECK( esp_console_cmd_register(&cmd) );
+}
+
+static int date_cmd(int argc, char **argv)
+{
+    // Get Time
+    time_t now = time(NULL);
+    char *result = ctime(&now);
+    printf("%s", result);
+    return 0;
+}
+
+static void register_date()
+{
+    const esp_console_cmd_t cmd = {
+	    .command = "date",
+        .help = "Get the current date / time",
+        .hint = NULL,
+        .func = &date_cmd
     };
     ESP_ERROR_CHECK( esp_console_cmd_register(&cmd) );
 }

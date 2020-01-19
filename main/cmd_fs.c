@@ -292,7 +292,8 @@ static int cd_func(int argc, char **argv)
       char *tmp = calloc(len+1, 1);
       if (NULL == tmp)
          return -1;
-      tmp = strncpy(tmp, default_path, len);
+      tmp = strncpy(tmp, default_path, len+1);
+      tmp[len] = '\0';
       if (NULL != cwd) { free(cwd); }
       cwd = tmp;
       return 0;
@@ -373,7 +374,8 @@ void register_fs()
    if (NULL == cwd)
       return;
 
-   cwd = strncpy(cwd, default_path, len);
+   cwd = strncpy(cwd, default_path, len+1);
+   cwd[len] = '\0';
 
    //mount
    //umount

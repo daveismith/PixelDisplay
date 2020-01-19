@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "sdkconfig.h"
 
 #include "PxMatrix.h"
 #include "display.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -74,7 +76,9 @@ typedef enum {
    DISPLAY_DRAW_LINE,
    DISPLAY_DRAW_CIRCLE,
    DISPLAY_FILL_CIRCLE,
-   DISPLAY_SET_PIXEL
+   DISPLAY_SET_PIXEL,
+   DISPLAY_SET_FONT,
+   DISPLAY_PRINT
 } display_cmd_e;
 
 typedef enum {
@@ -103,6 +107,14 @@ typedef struct {
 } display_fill_t;
 
 typedef struct {
+   size_t x;
+   size_t y;
+   uint8_t r;
+   uint8_t g;
+   uint8_t b;
+} display_pixel_t;
+
+typedef struct {
    size_t x0;
    size_t y0;
    size_t x1;
@@ -121,9 +133,19 @@ typedef struct {
    uint8_t b;
 } display_circle_t;
 
+typedef struct {
+   size_t x;
+   size_t y;
+   char *text;
+   uint8_t r;
+   uint8_t g;
+   uint8_t b;
+   GFXfont *font;
+} display_text_t;
+
 #define ANIM0
 #define ANIM1
-#define ANIM2
+//#define ANIM2
 
 const uint8_t animation_lengths[]={
 #ifdef ANIM0
@@ -158,6 +180,7 @@ size_t currentFrame = 0;
 size_t totalFrames = 0;
 size_t frameSize = 1024;
 uint32_t currentColour = 0;
+GFXfont *currentFont = NULL;
 
 char *currentFile = NULL;
 int currentFd = -1;
@@ -480,9 +503,66 @@ void _fillCircle(display_circle_t *circle) {
    _fillCircleHelper(circle->x, circle->y, circle->radius, 3, 0, circle->r, circle->g, circle->b);
 }
 
+void _drawText(display_text_t *text) {
+   // Start To Draw
+   //
+   //
+   //
+   //
+   size_t x = text->x;
+   size_t y = text->y;
+   size_t xIdx, yIdx, idx;
+   char *ptr = text->text;
+
+   while ('\0' != *ptr) {
+      uint8_t c = *ptr;
+      if ('\n' == c) {
+         x = text->x;
+	 y += text->font->yAdvance;
+      }
+
+      if (c >= text->font->first && c <= text->font->last) {
+         GFXglyph *glyph = NULL;
+	 size_t offset = 0;
+	 uint8_t bits;
+	 printf("char: %c\n", c);
+         c = c - text->font->first;
+         glyph = &text->font->glyph[c];
+	 offset = glyph->bitmapOffset;
+         bits = text->font->bitmap[offset];
+
+	 // Figure Out How To Draw
+	 idx = 0;
+
+         for (yIdx = 0; yIdx < glyph->height; yIdx++) {
+	    // Run Through And Print
+            size_t yCoord = y + glyph->yOffset + yIdx;
+	    for (xIdx = 0; xIdx < glyph->width; xIdx++) {
+	       size_t xCoord = x + glyph->xOffset + xIdx;
+
+               if (bits & 0x80) {
+	          _drawPixel(xCoord, yCoord, text->r, text->g, text->b);
+	       }
+	       bits <<= 1;
+
+	       if (++idx >= 8) {
+		  offset++;
+	          bits = text->font->bitmap[offset];
+		  idx = 0;
+	       }
+	    }
+	 }
+	 
+	 x += glyph->xAdvance;
+      }
+
+      ptr++;   // Advance The String Pointer 
+   }
+}
+
 //#define DISPLAY_TIMER_PERIOD_US        500
-//#define DISPLAY_TIMER_PERIOD_US        1000
-#define DISPLAY_TIMER_PERIOD_US        2000
+#define DISPLAY_TIMER_PERIOD_US        1000
+//#define DISPLAY_TIMER_PERIOD_US        2000
 
 void display_task(void *pvParameter)
 {
@@ -635,7 +715,26 @@ void display_task(void *pvParameter)
             }
                break;
             case DISPLAY_SET_PIXEL:
+	    {
+	       display_pixel_t *pixel = (display_pixel_t *)cmd.p;
+	       _drawPixel(pixel->x, pixel->y, pixel->r, pixel->g, pixel->b);
+	       free(pixel);
+	    }
                break;
+	    case DISPLAY_SET_FONT:
+	    {
+               currentFont = (GFXfont *)cmd.p;
+	    }
+	       break;
+	    case DISPLAY_PRINT:
+	    {
+               // Print
+	       display_text_t *text = (display_text_t *)cmd.p;
+	       _drawText(text);
+	       if (NULL != text->text)
+                  free(text->text);
+	       free(text);
+	    }
             default:
                break;
          }
@@ -902,3 +1001,110 @@ void display_fillCircle(size_t x0, size_t y0, size_t radius, uint8_t r, uint8_t 
    _circle(x0, y0, radius, r, g, b, true);
 }
 
+void display_setPixel(size_t x, size_t y, uint8_t r, uint8_t g, uint8_t b) {
+//display_drawLine(x, y, x, y, r, g, b);
+   if (NULL == xCommandQueue)
+      return;
+
+   display_pixel_t *pixel = (display_pixel_t *)calloc(sizeof(display_pixel_t), 1);
+   pixel->x = x;
+   pixel->y = y;
+   pixel->r = r;
+   pixel->g = g;
+   pixel->b = b;
+
+   display_cmd_t cmd = {
+      .command = DISPLAY_SET_PIXEL,
+      .p = pixel
+   };
+   xQueueSend( xCommandQueue, &cmd, (TickType_t) 0 );
+}
+
+void display_setFont(GFXfont *font) {
+   if (NULL == xCommandQueue)
+      return;
+
+   display_cmd_t cmd = {
+      .command = DISPLAY_SET_FONT,
+      .p = font
+   };
+   xQueueSend( xCommandQueue, &cmd, (TickType_t) 0 );
+}
+
+void display_print(char *text) {
+   if (NULL == xCommandQueue)
+      return;
+
+   size_t len = strlen(text);
+
+   display_text_t *print = calloc(1, sizeof(display_text_t));
+   
+   print->y = 8;
+   print->r = 128;
+   print->g = 128;
+   print->b = 128;
+   print->font = currentFont;
+
+   print->text = calloc(1, len+1);
+   memcpy(print->text, text, len);
+
+   display_cmd_t cmd = {
+      .command = DISPLAY_PRINT,
+      .p = print
+   };
+   xQueueSend( xCommandQueue, &cmd, (TickType_t) 0 );
+}
+
+void display_getTextBounds(char *text, size_t x, size_t y, size_t *x1, size_t *y1, size_t *w, size_t *h) {
+   if (NULL == x1 || NULL == y1 ||
+       NULL == w || NULL == h ||
+       NULL == currentFont) {
+      return;
+   }
+
+   size_t tmpW = 0;
+   char *ptr = text;
+
+   *w = 0;
+   *h = currentFont->yAdvance;
+
+   *x1 = x;
+   *y1 = y;
+
+   printf("\ncurrentFont->yAdvance: %u\n", currentFont->yAdvance);
+
+   while ('\0' != *ptr) {
+      uint8_t c = *ptr;
+      if ('\n' == c) {
+         if (tmpW > *w)
+            *w = tmpW;
+         *w = 0;
+         *h += currentFont->yAdvance;
+      }
+
+      if (c >= currentFont->first && c <= currentFont->last) {
+         GFXglyph *glyph = NULL;
+
+	 printf("measure %c", c);
+
+         c = c - currentFont->first;
+         glyph = &currentFont->glyph[c];
+
+         printf(" offset: %u, width: %u, height: %u, xAdvance: %u, xOFfset: %d, yOffset: %d\n", glyph->bitmapOffset, glyph->width, glyph->height, glyph->xAdvance, glyph->xOffset, glyph->yOffset);
+
+         tmpW += glyph->xAdvance;
+
+         if (*y1 > (y + *h) + glyph->yOffset) {
+            *y1 = (y + *h) + glyph->yOffset;
+         }
+
+         if (*x1 > (x + *w) + glyph->xOffset) {
+            *x1 = (x + *w) + glyph->xOffset;
+         }
+      }
+
+      ptr++;   // Advance The String Pointer 
+   }
+
+   if (tmpW > *w) { *w = tmpW; }
+}

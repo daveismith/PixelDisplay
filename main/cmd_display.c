@@ -301,6 +301,33 @@ static int draw_circle(int argc, char **argv)
    return 0;
 }
 
+static struct {
+   struct arg_int *x;
+   struct arg_int *y;
+   struct arg_int *red;
+   struct arg_int *green;
+   struct arg_int *blue;
+   struct arg_end *end;
+} pixel_args;
+
+static int set_pixel(int argc, char **argv)
+{
+   int nerrors = arg_parse(argc, argv, (void **) &pixel_args);
+   if (nerrors != 0) {
+      arg_print_errors(stderr, pixel_args.end, argv[0]);
+      return 1;
+   }
+
+   size_t x = (size_t)pixel_args.x->ival[0];
+   size_t y = (size_t)pixel_args.y->ival[0];
+   uint8_t r = (uint8_t)pixel_args.red->ival[0];
+   uint8_t g = (uint8_t)pixel_args.green->ival[0];
+   uint8_t b = (uint8_t)pixel_args.blue->ival[0];
+
+   display_setPixel(x, y, r, g, b);
+   return 0;
+}
+
 void register_display()
 {
 	// Register Some Commands
@@ -358,7 +385,7 @@ void register_display()
    const esp_console_cmd_t mode_cmd = {
       .command = "mode",
       .help = "Set the display mode",
-      .hint = "anim | colour | file",
+      .hint = "anim | colour | file | manual",
       .func = &set_mode
    };
    ESP_ERROR_CHECK( esp_console_cmd_register(&mode_cmd) );
@@ -482,4 +509,21 @@ void register_display()
       .argtable = &circle_args
    };
    ESP_ERROR_CHECK( esp_console_cmd_register(&draw_circle_cmd) );
+
+   pixel_args.x =  arg_int0(NULL, NULL, "<x>", "x coordinate");
+   pixel_args.y =  arg_int0(NULL, NULL, "<y>", "y coordinate");
+   pixel_args.red = arg_int0(NULL, NULL, "<red>", "red level (0-255)");
+   pixel_args.green = arg_int0(NULL, NULL, "<green>", "green level (0-255)");
+   pixel_args.blue = arg_int0(NULL, NULL, "<blue>", "blue level (0-255)");
+   pixel_args.end = arg_end(7);
+
+   const esp_console_cmd_t set_pixel_cmd = {
+      .command = "setPixel",
+      .help = "set the colour of a single pixel",
+      .hint = NULL,
+      .func = &set_pixel,
+      .argtable = &pixel_args
+   };
+   ESP_ERROR_CHECK( esp_console_cmd_register(&set_pixel_cmd) );
+
 }
